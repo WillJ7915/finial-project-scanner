@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# GitHub Repository Added
+# HTTPS: https://github.com/WillJ7915/finial-project-scanner.git
+# SSH: git@github.com:WillJ7915/finial-project-scanner.git
+
 # Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
