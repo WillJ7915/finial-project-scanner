@@ -1,5 +1,48 @@
-# Project Title: Network Vulnerability Scanner and Report Generator
-# Overview: Written bash script that generates a static report outline and saves this outline to a text file. This final vulnerability report will examine a designated network, asses points of concern and advise on remediation efforts to improve potential compromised systems.
-# Purpose/Learning: This bash script will serve as a learning tool and gained experience in network vulnerability scanning. 
-# Current Status: Bash script is formatted into eight categories, code functions have been included, and output scanner results are defined to "net_scan_rpt.txt". Categories are as follows: 1. Operating System Detection; 2. Open Ports and Detection Services; 3. SSL/TLS Configuration; 4. Firewall and Security Tools Detected; 5. Potential Vulnerabilities Identified; 6. Detected Services Version Information; 7. Recommendations for Remediation; 8. Notes and Analyst Comments. Two of eight sections configured for scanning (1 and 2 complete). Color coding has been implemented for visual ascetics. 
-# Future Goals: Complete remaining sections prior to 15 August 2025.
+# Network Security Vulnerability Scanner and Report Generator
+**Author:** William Jones
+**Course:** Shell Scripting for Technologists
+**Repository:**
+- [HTTPS Link](https://github.com/WillJ7915/finial-project-scanner.git)
+- SSH: `git@github.com:WillJ7915/finial-project-scanner.git`
+
+---
+
+## Description
+
+This Bash script is a comprehensive **network security vulnerability scanning tool** designed for educational use in a UAT Shell Scripting for Technologists course. It takes an IP address or hostname as input and generates a structured security report.
+
+The script performs the following: 
+- Validates input
+- Scans open ports and services using `nmap`
+- Displays simulated details for SSL/TLS, OS detection, firewall tools and vulnerabilities
+- Outputs a well-formatted report to `net_scan_rpt.txt`
+
+---
+
+## Features
+
+- Input Validation
+- Color-coded terminal output (ANSI escape codes)
+- ASCII banner via `figlet`
+- Nmap port/service scanning (`-sV`)
+- Simulated:
+  - OS fingerprinting
+  - SSL/TLS settings
+  - Vulnerability findings
+  - Firewall and IDS/IPS detection
+  - Analyst recommendations section
+  - Report timestamp and formatting
+
+ ---
+
+ ## Requirements
+
+ - **Operating System:** Linux (Ubuntu recommended)
+ - **Packages:**
+   - `nmap`
+   - `figlet`
+  
+Install using:
+```bash
+sudo apt update
+sudo apt install nmap figlet
