@@ -15,6 +15,22 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 # No Color / Reset
 
+# Global Variables
+timestamp=$(date +"%Y%m%d_%H%M%S")
+SCAN_RESULTS=""
+NMAP_RESULTS="nmap_scan.txt"
+NMAP_VULN_RESULTS="nmap_vuln_scan.txt"
+FINAL_REPORT="net_scan_rpt_$timestamp.txt"
+
+# Tool Checks
+check_dependencies() {
+  for cmd in nmap nikto figlet; do
+    if ! command -v "$cmd" &> /dev/null; then
+      echo "Error: '$cmd' is not installed. Please install it first."
+      exit 1
+    fi
+  done
+}
 
 # Print Usage and Exit if Arguments are Invalid
 validate_input() {
@@ -45,17 +61,73 @@ write_os_section() {
   echo ""
 }
 
-# Open Ports and Services Section
+# Nmap Scan Section
+write_nmap_scan_section() {
+  local target="$1"
+  local timestamp
+  timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+
+  echo -e "${CYAN}--------------------------------------"
+  echo "Nmap Scan:"
+  echo -e "--------------------------------------${NC}"
+
+  echo "### Nmap Fast Scan Results for $target on $timestamp ###" >> "$FINAL_REPORT"
+
+  # Fast scan to identify basic open services
+  nmap -sV -F "$target" | tee "$NMAP_RESULTS" | grep -E "^[0-9]+/tcp\s+open" | while read -r line; do
+    echo -e "${CYAN}$line${NC}"
+  done
+
+  # Append full fast scan results to the report
+  cat "$NMAP_RESULTS" >> "$FINAL_REPORT"
+
+  # Now run the vulnerability script scan
+  echo -e "${CYAN}\n--- Launching Vulnerability Script Scan ---${NC}"
+  echo "### Nmap --script vuln Results for $target on $timestamp ###" >> "$FINAL_REPORT"
+
+  echo "[DEBUG] Running nmap vuln scan..." >> "$FINAL_REPORT"
+  nmap -sV --script vuln "$target" | tee "$NMAP_VULN_RESULTS"
+  echo "[DEBUG] Appending vuln scan to final report..." >> "$FINAL_REPORT"
+  cat "$NMAP_VULN_RESULTS" >> "$FINAL_REPORT"
+
+  # Store the scan output in a global variable for later use (in vuln parsing)
+  SCAN_RESULTS=$(cat "$NMAP_RESULTS"; echo ""; cat "$NMAP_VULN_RESULTS")
+}
+
+# Open Ports + Web Services (80/443) Section
 write_ports_section() {
   local target="$1"
   echo -e "${GREEN}---------------------------------"
-  echo "Open Ports and Detected Services:"
+  echo "Open Ports and Web Services:"
   echo -e "---------------------------------${NC}"
-# Run Nmap Scan and Append Open Ports/Services
-  nmap -sV "$target" | grep "open" | while read -r line; do
-    echo -e "${GREEN}$line${NC}"
-  done
+  if grep -qE '\b(80|443)/tcp\s+open' "$NMAP_RESULTS"; then
+    echo -e "\n\n### Nikto Deep Dive Results ###" >> "$FINAL_REPORT"
+    echo "[+] Web server detected. Launching Nikto..."
+    nikto -h "$target" >> "$FINAL_REPORT"
+    echo "[+] Nikto scan complete."
+else
+    echo "[+] No web server detected on common ports. Skipping Nikto scan."
+fi
   echo ""
+}
+
+# Ports and Services Results
+write_ports_services_section() {
+  echo -e "${CYAN}-------------------------------------------"
+  echo "Breakdown: Detected Open Ports & Services"
+  echo -e "-------------------------------------------${NC}"
+
+  echo "$SCAN_RESULTS" | grep "open" | while read -r line; do
+    # Example line: 80/tcp   open  http    Apache httpd 2.4.49
+    port=$(echo "$line" | awk '{print $1}')
+    service=$(echo "$line" | awk '{print $3}')
+    version=$(echo "$line" | cut -d ' ' -f4-)
+
+    echo -e "${GREEN}Port:${NC} $port"
+    echo -e "${GREEN}Service:${NC} $service"
+    echo -e "${GREEN}Version:${NC} $version"
+    echo ""
+  done
 }
 
 # SSL/TLS Configuration
@@ -82,12 +154,30 @@ write_firewall_section() {
 
 # Vulnerabilities Section
 write_vulns_section() {
+  local target="$1"
   echo -e "${RED}-------------------------------------"
-  echo "Potential Vulnerabilities Identified:"
+  echo "Analyzing Potential Vulnerabilities and Service Versions:"
   echo -e "-------------------------------------${NC}"
-  echo "CVE-2023-XXXX - Outdated Web Server"
-  echo "Default Credentials - FTP Server"
-  echo "Weak SSH Key - Possible brute-force vulnerability"
+  echo "$SCAN_RESULTS" | while read -r line; do
+  case "$line" in
+    *"vsftpd 2.3.4"*)
+      echo -e "${RED}[!!] VULNERABILITY DETECTED: vsftpd 2.3.4 is running, which contains a known critical backdoor.${NC}"
+      echo -e "     CVSS Score: 10.0 — ${RED}Severity: Critical${NC} (CVE-2011-2523 unofficial)"
+      ;;
+    *"Apache httpd 2.4.49"*)
+      echo -e "${RED}[!!] VULNERABILITY DETECTED: Apache 2.4.49 is running, which is vulnerable to path traversal (CVE-2021-41773).${NC}"
+      echo -e "     CVSS Score: 7.5 — ${YELLOW}Severity: High${NC} (CVE-2021-41773)"
+      ;;
+    *"Exim 4.87"*)
+      echo -e "${RED}[!!] VULNERABILITY DETECTED: Exim 4.87 is running, vulnerable to remote code execution (CVE-2019-10149).${NC}"
+      echo -e "     CVSS Score: 9.8 — ${RED}Severity: Critical${NC} (CVE-2019-10149)"
+      ;;
+    *"OpenSSH 7.2p2"*)
+      echo -e "${RED}[!!] VULNERABILITY DETECTED: OpenSSH 7.2p2 is running, which is vulnerable to information disclosure (CVE-2016-0777).${NC}"
+      echo -e "     CVSS Score: 5.3 — ${YELLOW}Severity: Medium${NC} (CVE-2016-0777)"
+      ;;
+  esac
+done
   echo ""
 }
 
@@ -131,13 +221,16 @@ write_footer() {
 # Main Function
 main() {
   validate_input "$@"
+  check_dependencies
 
   local target="$1"
   local REPORT_FILE="net_scan_rpt.txt"
 
   write_header "$target" > "$REPORT_FILE"
   write_os_section >> "$REPORT_FILE"
+  write_nmap_scan_section "$target" >> "$REPORT_FILE"
   write_ports_section "$target" >> "$REPORT_FILE"
+  write_ports_services_section >> "$REPORT_FILE" 
   write_ssl_section >> "$REPORT_FILE"
   write_firewall_section >> "$REPORT_FILE"
   write_vulns_section >> "$REPORT_FILE"

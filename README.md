@@ -21,28 +21,37 @@ The script performs the following:
 
 ## Features
 
-- Input Validation
-- Color-coded terminal output (ANSI escape codes)
-- ASCII banner via `figlet`
-- Nmap port/service scanning (`-sV`)
-- Simulated:
+- **Input Validation**
+- **Color-coded terminal output** (ANSI escape codes)
+- **ASCII Banner** via `figlet`
+- **Nmap Scanning**: 
+  - Fast scan (`-sV -F`)
+  - Vulnerability detection using `--script vuln`
+- **Simulated Details**:
   - OS fingerprinting
-  - SSL/TLS settings
-  - Vulnerability findings
-  - Firewall and IDS/IPS detection
-  - Analyst recommendations section
-  - Report timestamp and formatting
+  - SSL/TLS configuration checks
+  - Firewall & IDS/IPS detection
+- **Vulnerability Detection**:
+  - Specific version checks for known CVEs
+  - Color-coded severity (based on CVSS)
+  - CVSS scores and CVE references included
+- **Per-Port & Per-Service Breakout**
+- **Analyst Recommendations and Notes**
+- **Timestamped Output**
+- **Final Report** saved as `net_scan_rpt.txt
 
  ---
 
  ## Requirements
 
  - **Operating System:** Linux (Ubuntu recommended)
- - **Packages:**
+ - **Packages (must be installed):**
    - `nmap`
    - `figlet`
+   - `nikto` *(for web vulnerability scanning)*
   
-Install using:
+Install prerequisits using:
+
 ```bash
 sudo apt update
-sudo apt install nmap figlet
+sudo apt install nmap figlet nikto
