@@ -16,11 +16,11 @@ NC='\033[0m'
 # No Color / Reset
 
 # Global Variables
-timestamp=$(date +"%Y%m%d_%H%M%S")
+timestamp=$(date +"%Y%m%d_%H%M")
 SCAN_RESULTS=""
 NMAP_RESULTS="nmap_scan.txt"
 NMAP_VULN_RESULTS="nmap_vuln_scan.txt"
-FINAL_REPORT="net_scan_rpt_$timestamp.txt"
+FINAL_REPORT="$net_scan_rpt_${timestamp}.txt"
 
 # Tool Checks
 check_dependencies() {
@@ -91,7 +91,8 @@ write_nmap_scan_section() {
   cat "$NMAP_VULN_RESULTS" >> "$FINAL_REPORT"
 
   # Store the scan output in a global variable for later use (in vuln parsing)
-  SCAN_RESULTS=$(cat "$NMAP_RESULTS"; echo ""; cat "$NMAP_VULN_RESULTS")
+  SCAN_RESULTS_SERVICES=$(cat "$NMAP_RESULTS")
+  SCAN_RESULTS_VULNS=$(cat "$NMAP_VULN_RESULTS")
 }
 
 # Open Ports + Web Services (80/443) Section
@@ -104,6 +105,7 @@ write_ports_section() {
     echo -e "\n\n### Nikto Deep Dive Results ###" >> "$FINAL_REPORT"
     echo "[+] Web server detected. Launching Nikto..."
     nikto -h "$target" >> "$FINAL_REPORT"
+    timeout 200s nikto -h "$target" >> "$FINAL_REPORT" 2>&1
     echo "[+] Nikto scan complete."
 else
     echo "[+] No web server detected on common ports. Skipping Nikto scan."
@@ -113,19 +115,24 @@ fi
 
 # Ports and Services Results
 write_ports_services_section() {
-  echo -e "${CYAN}-------------------------------------------"
-  echo "Breakdown: Detected Open Ports & Services"
-  echo -e "-------------------------------------------${NC}"
+  echo -e "${GREEN}Breakdown: Detected Open Ports & Services${NC}"
 
-  echo "$SCAN_RESULTS" | grep "open" | while read -r line; do
+  echo "$SCAN_RESULTS_SERVICES" | grep "open" | while read -r line; do
     # Example line: 80/tcp   open  http    Apache httpd 2.4.49
     port=$(echo "$line" | awk '{print $1}')
     service=$(echo "$line" | awk '{print $3}')
-    version=$(echo "$line" | cut -d ' ' -f4-)
+    product_name=$(echo "$line" | awk '{print $4}')
+    product_version=$(echo "$line" | awk '{print $5}')
 
     echo -e "${GREEN}Port:${NC} $port"
     echo -e "${GREEN}Service:${NC} $service"
-    echo -e "${GREEN}Version:${NC} $version"
+    echo -e "${GREEN}Product:${NC} $product_name"
+    echo -e "${GREEN}Version:${NC} $product_version"
+
+  if [ -n "$product_name" ] && [ -n "$product_version" ]; then
+    query_nvd "$product_name" "$product_version"
+fi
+
     echo ""
   done
 }
@@ -158,27 +165,49 @@ write_vulns_section() {
   echo -e "${RED}-------------------------------------"
   echo "Analyzing Potential Vulnerabilities and Service Versions:"
   echo -e "-------------------------------------${NC}"
-  echo "$SCAN_RESULTS" | while read -r line; do
-  case "$line" in
-    *"vsftpd 2.3.4"*)
-      echo -e "${RED}[!!] VULNERABILITY DETECTED: vsftpd 2.3.4 is running, which contains a known critical backdoor.${NC}"
-      echo -e "     CVSS Score: 10.0 — ${RED}Severity: Critical${NC} (CVE-2011-2523 unofficial)"
+  echo "$SCAN_RESULTS_VULNS" | grep "open" | while read -r line; do
+
+    service_info=$(echo "$line" | cut -d ' ' -f3-)
+    product=$(echo "$service_info" | awk '{print $1}')
+    version=$(echo "$service_info" | awk '{print $2}')
+
+  echo "[DEBUG] product=$product, version=$version"
+
+  case "$product $version" in
+    "vsftpd 2.3.4")
+      echo -e "${RED}[!!] VULNERABILITY DETECTED: vsftpd 2.3.4 has a known backdoor.${NC}"
+      echo -e "     CVSS Score: 10.0 — Critical"
       ;;
-    *"Apache httpd 2.4.49"*)
-      echo -e "${RED}[!!] VULNERABILITY DETECTED: Apache 2.4.49 is running, which is vulnerable to path traversal (CVE-2021-41773).${NC}"
-      echo -e "     CVSS Score: 7.5 — ${YELLOW}Severity: High${NC} (CVE-2021-41773)"
+    "Apache httpd 2.4.49")
+      echo -e "${RED}[!!] VULNERABILITY DETECTED: Apache 2.4.49 vulnerable to path traversal (CVE-2021-41773).${NC}"
+      echo -e "     CVSS Score: 7.5 — High"
       ;;
-    *"Exim 4.87"*)
-      echo -e "${RED}[!!] VULNERABILITY DETECTED: Exim 4.87 is running, vulnerable to remote code execution (CVE-2019-10149).${NC}"
-      echo -e "     CVSS Score: 9.8 — ${RED}Severity: Critical${NC} (CVE-2019-10149)"
+    "Exim 4.87")
+      echo -e "${RED}[!!] VULNERABILITY DETECTED: Exim 4.87 RCE (remote code execution) (CVE-2019-10149).${NC}"
+      echo -e "     CVSS Score: 9.8 — Critical"
       ;;
-    *"OpenSSH 7.2p2"*)
-      echo -e "${RED}[!!] VULNERABILITY DETECTED: OpenSSH 7.2p2 is running, which is vulnerable to information disclosure (CVE-2016-0777).${NC}"
-      echo -e "     CVSS Score: 5.3 — ${YELLOW}Severity: Medium${NC} (CVE-2016-0777)"
+    "OpenSSH 7.2p2")
+      echo -e "${RED}[!!] VULNERABILITY DETECTED: OpenSSH 7.2p2 information disclosure (CVE-2016-0777).${NC}"
+      echo -e "     CVSS Score: 5.3 — Medium"
       ;;
   esac
 done
+
   echo ""
+}
+
+# NVD Query Function
+write_query_section() {
+  local product="#1"
+  local version="$2"
+  local results_limit=3
+
+  echo "[+] Querying NVD for $product $version ..." >> "$FINAL_REPORT"
+
+  curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${product}%20${version}&resultsPerPage=${results_limit}" \
+    | jq '.vulnerabilities[]?.cve | {id: .id, description: .descriptions[0].value}'
+
+  echo "" >> "$FINAL_REPORT"
 }
 
 # Detected Services Version Information
@@ -224,16 +253,15 @@ main() {
   check_dependencies
 
   local target="$1"
-  local REPORT_FILE="net_scan_rpt.txt"
-
+  
   write_header "$target" > "$REPORT_FILE"
   write_os_section >> "$REPORT_FILE"
-  write_nmap_scan_section "$target" >> "$REPORT_FILE"
+  write_nmap_scan_section "$target" 
   write_ports_section "$target" >> "$REPORT_FILE"
   write_ports_services_section >> "$REPORT_FILE" 
   write_ssl_section >> "$REPORT_FILE"
   write_firewall_section >> "$REPORT_FILE"
-  write_vulns_section >> "$REPORT_FILE"
+  write_vulns_section | sed 's/\x1b\[[0-9;]*m//g' >> "$REPORT_FILE"
   write_versions_section >> "$REPORT_FILE"
   write_recs_section >> "$REPORT_FILE"
   write_notes_section >> "$REPORT_FILE"
