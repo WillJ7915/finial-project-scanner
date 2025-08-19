@@ -13,23 +13,54 @@ MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 WHITE='\033[1;37m'
 NC='\033[0m'
+
 # No Color / Reset
+
+# Helpers for clean reporting
+strip_ansi() { sed -r 's/\x1B\[[0-9;]*[mK]//g'; }
+
+section() { log_both "### $1 ###"; }
+
+append_report() { strip_ansi >> "$FINAL_REPORT"; }
+
+log_both() {
+  # Print colored to console; plain to file
+  local msg="$1"
+  echo -e "$msg"
+  echo -e "$msg" | append_report
+}
+
+record_severity() {
+  case "$1" in
+    Critical) ((CRITICAL_COUNT++)) ;;
+    High)     ((HIGH_COUNT++)) ;;
+    Medium)   ((MEDIUM_COUNT++)) ;;
+    Low)      ((LOW_COUNT++)) ;;
+  esac
+}
 
 # Global Variables
 timestamp=$(date +"%Y%m%d_%H%M")
 SCAN_RESULTS=""
 NMAP_RESULTS="nmap_scan.txt"
 NMAP_VULN_RESULTS="nmap_vuln_scan.txt"
-FINAL_REPORT="$net_scan_rpt_${timestamp}.txt"
+FINAL_REPORT="net_scan_rpt_${timestamp}.txt"
+CRITICAL_COUNT=0
+HIGH_COUNT=0
+MEDIUM_COUNT=0
+LOW_COUNT=0
 
 # Tool Checks
 check_dependencies() {
-  for cmd in nmap nikto figlet; do
-    if ! command -v "$cmd" &> /dev/null; then
+  local -a cmds=(nmap nikto figlet curl jq timeout grep awk sed tee)
+  local missing=0
+  for cmd in "${cmds[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
       echo "Error: '$cmd' is not installed. Please install it first."
-      exit 1
+      missing=1
     fi
   done
+  [ "$missing" -eq 1 ] && exit 1
 }
 
 # Print Usage and Exit if Arguments are Invalid
@@ -43,52 +74,90 @@ validate_input() {
 # Header
 write_header() {
   local target="$1"
+
+
+  local FIG_FONT="smblock"
+  if ! figlet -f "$FIG_FONT" "X" >/dev/null 2>&1; then
+    FIG_FONT="slant"
+  fi
+
+
   echo -e "${RED}*****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}*****${NC}"
-  figlet -f smblock "Network Security Scan Report"
+  figlet -f "$FIG_FONT" "Network Security Scan Report"
   echo -e "${RED}*****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}*****${NC}"
-  echo ""
-  echo "Target IP/Hostname: $target"
-  echo ""
+
+
+  log_both "Target IP/Hostname: $target"
+  log_both "Generated: $(date '+%Y-%m-%d %H:%M')"
+
+
+  # TOC (printed to both, stored plain in file)
+  log_both ""
+  log_both "## Table of Contents"
+  log_both "1. Operating System Detection"
+  log_both "2. Nmap Scan"
+  log_both "3. Open Ports & Web Services"
+  log_both "4. Detected Open Ports & Services"
+  log_both "5. SSL/TLS Configuration"
+  log_both "6. Firewall Indicators"
+  log_both "7. Vulnerability Findings"
+  log_both "8. Detected Services Version Information"
+  log_both "9. Recommendations for Remediation"
+  log_both "10. Notes and Analyst Comments"
+  log_both ""
+}
+
+write_summary_section() {
+  section "Criticality Summary"
+
+
+  log_both "Critical Findings: $CRITICAL_COUNT"
+  log_both "High Findings:     $HIGH_COUNT"
+  log_both "Medium Findings:   $MEDIUM_COUNT"
+  log_both "Low Findings:      $LOW_COUNT"
+  log_both ""
 }
 
 # Operating System Detection
 write_os_section() {
-  echo -e "${BLUE}---------------------------"
-  echo "Operating System Detection:"
-  echo -e "---------------------------${NC}"
-  echo "Detected OS: Linux (Kernel 5.x)"
-  echo "Accuracy: 90%"
-  echo ""
+  section "Operating System Detection"
+  # OS detection may require sudo
+  if command -v nmap >/dev/null 2>&1; then
+    # Light OS guess using service fingerprints
+    grep -E "Service Info: OS:" "$NMAP_RESULTS" | append_report
+
+    # Deeper check (without sudo)
+    echo -e "\n--- nmap -O (if permitted) ---" | append_report
+    nmap -O "$1" 2>/dev/null | grep -E "OS details|Running|CPE:" | append_report
+  else
+    log_both "nmap not available for OS detection."
+  fi
 }
 
 # Nmap Scan Section
 write_nmap_scan_section() {
   local target="$1"
   local timestamp
-  timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+  timestamp=$(date "+%Y-%m-%d %H:%M")
 
-  echo -e "${CYAN}--------------------------------------"
-  echo "Nmap Scan:"
-  echo -e "--------------------------------------${NC}"
+  section "Nmap Scan"
+  log_both "Fast scan (-sV -F) for ${target} ad ${ts}"
 
-  echo "### Nmap Fast Scan Results for $target on $timestamp ###" >> "$FINAL_REPORT"
 
   # Fast scan to identify basic open services
   nmap -sV -F "$target" | tee "$NMAP_RESULTS" | grep -E "^[0-9]+/tcp\s+open" | while read -r line; do
     echo -e "${CYAN}$line${NC}"
-  done
+  done | append_report
 
-  # Append full fast scan results to the report
-  cat "$NMAP_RESULTS" >> "$FINAL_REPORT"
 
-  # Now run the vulnerability script scan
-  echo -e "${CYAN}\n--- Launching Vulnerability Script Scan ---${NC}"
-  echo "### Nmap --script vuln Results for $target on $timestamp ###" >> "$FINAL_REPORT"
+  # Also dump full fast-scan into the report
+  echo -e "\n--- Full Fast Scan Output ---" | append_report
+  cat "$NMAP_RESULTS" | append_report
 
-  echo "[DEBUG] Running nmap vuln scan..." >> "$FINAL_REPORT"
-  nmap -sV --script vuln "$target" | tee "$NMAP_VULN_RESULTS"
-  echo "[DEBUG] Appending vuln scan to final report..." >> "$FINAL_REPORT"
-  cat "$NMAP_VULN_RESULTS" >> "$FINAL_REPORT"
+  log_both "\n--- Launching Vulnerability Script Scan ---"
+  nmap -sV --script vuln "$target" | tee "$NMAP_VULN_RESULTS" >/dev/null
+  echo -e "\n--- nmap --script vuln Output ---" | append_report
+  cat "$NMAP_VULN_RESULTS" | append_report
 
   # Store the scan output in a global variable for later use (in vuln parsing)
   SCAN_RESULTS_SERVICES=$(cat "$NMAP_RESULTS")
@@ -97,32 +166,30 @@ write_nmap_scan_section() {
 
 # Open Ports + Web Services (80/443) Section
 write_ports_section() {
-  local target="$1"
-  echo -e "${GREEN}---------------------------------"
-  echo "Open Ports and Web Services:"
-  echo -e "---------------------------------${NC}"
+  section "Open Ports & Web Services"
   if grep -qE '\b(80|443)/tcp\s+open' "$NMAP_RESULTS"; then
-    echo -e "\n\n### Nikto Deep Dive Results ###" >> "$FINAL_REPORT"
-    echo "[+] Web server detected. Launching Nikto..."
-    nikto -h "$target" >> "$FINAL_REPORT"
-    timeout 200s nikto -h "$target" >> "$FINAL_REPORT" 2>&1
-    echo "[+] Nikto scan complete."
-else
-    echo "[+] No web server detected on common ports. Skipping Nikto scan."
-fi
-  echo ""
+    log_both "[+] Web Server detected. Launching Nikto (200s timeout)..."
+    echo -e "\n--- Nikto Output ---" | append_report
+    timeout 200s nikto -h "$1" 2>&1 | append_report
+    log_both "[+] Nikto Scan Complete."
+  else
+    log_both "[+] No Web Server detected on common ports. Skipping Nikto scan."
+  fi
 }
 
 # Ports and Services Results
 write_ports_services_section() {
-  echo -e "${GREEN}Breakdown: Detected Open Ports & Services${NC}"
+  section "Detected Open Ports & Services"
 
   echo "$SCAN_RESULTS_SERVICES" | grep "open" | while read -r line; do
     # Example line: 80/tcp   open  http    Apache httpd 2.4.49
     port=$(echo "$line" | awk '{print $1}')
     service=$(echo "$line" | awk '{print $3}')
-    product_name=$(echo "$line" | awk '{print $4}')
-    product_version=$(echo "$line" | awk '{print $5}')
+
+
+    product_and_version=$(echo "$line" | cut -d ' ' -f4-)
+    product_name=$(echo "$product_and_version" | awk '{NF--; print}')
+    product_version=$(echo "$product_and_version" | awk '{print $NF}')
 
     echo -e "${GREEN}Port:${NC} $port"
     echo -e "${GREEN}Service:${NC} $service"
@@ -131,7 +198,7 @@ write_ports_services_section() {
 
   if [ -n "$product_name" ] && [ -n "$product_version" ]; then
     query_nvd "$product_name" "$product_version"
-fi
+  fi
 
     echo ""
   done
@@ -139,105 +206,159 @@ fi
 
 # SSL/TLS Configuration
 write_ssl_section() {
-  echo -e "${YELLOW}----------------------"
-  echo "SSL/TLS Configuration:"
-  echo -e "----------------------${NC}"
-  echo "Port 443: TLS 1.2 Enabled, TLS 1.0/1.1 Disabled"
-  echo "Self-Signed Certificate Detected"
-  echo "Certificate Expiry: 30 days remaining"
-  echo ""
+  section "SSL/TLS Configuration"
+  if grep -qE '\b443/tcp\s+open' "$NMAP_RESULTS"; then
+    log_both "Port 443 detected open. Summarizing TLS via nmap ssl-enum-ciphers..."
+    echo -e "\n--- nmap --script ssl-enum-ciphers -p 443 ---" | append_report
+    nmap --script ssl-enum-ciphers -p 443 "$1" 2>/dev/null \
+      | grep -E "TLSv|cipher|ciphers" | append_report
+  else
+    log_both "No HTTPS service (443) detect in fast scan. Skipping TLS details."
+  fi
 }
 
 # Firewall and Security Tools Detection
 write_firewall_section() {
-  echo -e "${MAGENTA}-------------------------------------"
-  echo "Firewall and Security Tools Detected:"
-  echo -e "-------------------------------------${NC}"
-  echo "UFW Firewall - Active"
-  echo "Fail2Ban Service - Running"
-  echo "SNORT IDS - Not Detected"
-  echo ""
+  section "Firewall Indicators"
+  if grep -q "filtered" "$NMAP_RESULTS"; then
+    log_both "Some ports appear filtered. A firewall or packet filter is likely present."
+  else
+    log_both "No clear indicators of packet filtering in fast scan."
+  fi
 }
 
 # Vulnerabilities Section
 write_vulns_section() {
-  local target="$1"
-  echo -e "${RED}-------------------------------------"
-  echo "Analyzing Potential Vulnerabilities and Service Versions:"
-  echo -e "-------------------------------------${NC}"
-  echo "$SCAN_RESULTS_VULNS" | grep "open" | while read -r line; do
+  section "Vulnerability Findings"
 
-    service_info=$(echo "$line" | cut -d ' ' -f3-)
-    product=$(echo "$service_info" | awk '{print $1}')
-    version=$(echo "$service_info" | awk '{print $2}')
 
-  echo "[DEBUG] product=$product, version=$version"
+  # Summarize CVEs that nmap scripts printed
+  if grep -qE 'CVE-' "$NMAP_VULN_RESULTS"; then
+    log_both "CVE references detected by nmap scripts:"
+    grep -E 'CVE-' "$NMAP_VULN_RESULTS" \
+      | sed 's/^[[:space:]]\+//; s/[[:space:]]\+$//' \
+      | sort -u \
+      | while read -r cve; do
+          # Attempt detection of severity keywords in line
+          if echo "$cve" | grep -qi "CVSS.*10\|Critical"; then
+            record_severity Critical
+          elif echo "$cve" | grep -qi "CVSS.*[7-9]\|High"; then
+            record_severity High
+          elif echo "$cve" | grep -qi "CVSS.*[4-6]\|Medium"; then
+            record_severity Medium
+          else
+            record_severity Low
+          fi
+          echo "$cve" | append_report
+       done
+  else
+    log_both "No CVE references found by nmap --script vuln."
+  fi
 
-  case "$product $version" in
-    "vsftpd 2.3.4")
-      echo -e "${RED}[!!] VULNERABILITY DETECTED: vsftpd 2.3.4 has a known backdoor.${NC}"
-      echo -e "     CVSS Score: 10.0 — Critical"
-      ;;
-    "Apache httpd 2.4.49")
-      echo -e "${RED}[!!] VULNERABILITY DETECTED: Apache 2.4.49 vulnerable to path traversal (CVE-2021-41773).${NC}"
-      echo -e "     CVSS Score: 7.5 — High"
-      ;;
-    "Exim 4.87")
-      echo -e "${RED}[!!] VULNERABILITY DETECTED: Exim 4.87 RCE (remote code execution) (CVE-2019-10149).${NC}"
-      echo -e "     CVSS Score: 9.8 — Critical"
-      ;;
-    "OpenSSH 7.2p2")
-      echo -e "${RED}[!!] VULNERABILITY DETECTED: OpenSSH 7.2p2 information disclosure (CVE-2016-0777).${NC}"
-      echo -e "     CVSS Score: 5.3 — Medium"
-      ;;
-  esac
-done
 
-  echo ""
+  # Include the full vuln script output in the report
+  echo -e "\n--- Full nmap --script vuln Output ---" | append_report
+  cat "$NMAP_VULN_RESULTS" | append_report
 }
 
 # NVD Query Function
-write_query_section() {
-  local product="#1"
+query_nvd() {
+  local product="$1"
   local version="$2"
   local results_limit=3
 
-  echo "[+] Querying NVD for $product $version ..." >> "$FINAL_REPORT"
+  # Avoid empty queries
+  [ -z "$product" ] && return
+  [ -z "$version" ] && return
 
-  curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${product}%20${version}&resultsPerPage=${results_limit}" \
-    | jq '.vulnerabilities[]?.cve | {id: .id, description: .descriptions[0].value}'
+  # URL-encode spaces minimally
+  local q
+  q=$(printf "%s %s" "$product" "$version" | sed 's/ \+/%20/g')
 
-  echo "" >> "$FINAL_REPORT"
+  # Header in both console (color) and report (plain)
+  log_both "\n### NVD Matches: ${product} ${version} ###"
+
+  curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${q}&resultsPerPage=${results_limit}" \
+  | jq -r '
+     .vulnerabilities[]?.cve
+     | {
+         id: .id,
+         desc: (.descriptions[]? | select(.lang=="en") | .value) // "No English description",
+         score: (
+           .metrics.cvssMetricV31[0]?.cvssData.baseScore //
+           .metrics.cvssMetricV30[0]?.cvssData.baseScore //
+           .metrics.cvssMetricV2[0]?.cvssData.baseScore // "N/A"
+         )
+       }
+     | "- \(.id) - CVSS: \(.score)\n  \(.desc)"
+   ' \
+  | append_report # to file only keeping console clean
 }
 
 # Detected Services Version Information
 write_versions_section() {
-  echo -e "${CYAN}--------------------------------------"
-  echo "Detected Services Version Information:"
-  echo -e "--------------------------------------${NC}"
-  echo "Apache HTTP Server 2.4.29"
-  echo "OpenSSH 7.6p1 Ubuntu"
-  echo "MySQL Server 5.7.33"
-  echo ""
+  section "Detected Services Version Information"
+
+
+  if [ -n "$SCAN_RESULTS_SERVICES" ]; then
+    echo "$SCAN_RESULTS_SERVICES" \
+    | grep "open" \
+    | awk '{printf "- Port %s: %s %s %s\n", $1, $3, $4, $5}' \
+    | append_report
+  else
+    log_both "No Version Information available (did scan run?)."
+  fi
+
+
+  log_both ""
 }
 
 # Recommendations Section
 write_recs_section() {
-  echo -e "${NC}--------------------------------"
-  echo "Recommendations for Remediation:"
-  echo -e "--------------------------------"
-  echo "1. Update all software to the latest versions."
-  echo "2. Change default credentials immediately."
-  echo "3. Implement a firewall."
-  echo ""
+  section "Recommendations for Remediation"
+
+
+  log_both "General Best Practices:"
+  log_both "1. Keep all software updated to the latest stable versions."
+  log_both "2. Change or disable default credentials immediately."
+  log_both "3. Enforce strong password and SSH key policies."
+  log_both "4. Implement a Firewall and restrict unnecessary open ports."
+  log_both "5. Regularly back up configurations and critical data."
+
+  # Conditional service-based recommendations
+  if echo "$SCAN_RESULTS_SERVICES" | grep -qi "apache"; then
+    log_both "6. Harden Apache: disable directory listing, apply security modules (mod_security)."
+  fi
+  if echo "$SCAN_RESULTS_SERVICES" | grep -qi "mysql"; then
+    log_both "7. Secure MySQL: restrict root access, enforce SSL/TLS, and use least privilege accounts."
+  fi
+  if echo "$SCAN_RESULTS_SERVICES" | grep -qi "ssh"; then
+    log_both "8. Secure SSH: disable root login, enforce key-based authentication, change default port if possible."
+  fi
+
+
+  log_both ""
 }
 
 # Notes and Analyst Comments
 write_notes_section() {
-  echo "---------------------------"
-  echo "Notes and Analyst Comments:"
-  echo "---------------------------"
-  echo ""
+  section "Notes & Analyst Comments"
+
+
+  log_both "This section is reserved for analyst observations."
+  log_both "Consider including:"
+  log_both "- Business impact of identified vulnerabilities"
+  log_both "- Potential false positives from automated scans"
+  log_both "- Recommendations for further manual testing"
+  log_both "- Any unusual network behavior noticed during scans"
+
+
+  log_both "\n[Analyst Notes Placeholder]\n"
+
+  # Manual notes to be viewed
+  if [ -f "analyst_notes.txt" ]; then
+    cat analyst_notes.txt | append_report
+  fi
 }
 
 # Footer
@@ -253,19 +374,21 @@ main() {
   check_dependencies
 
   local target="$1"
-  
-  write_header "$target" > "$REPORT_FILE"
-  write_os_section >> "$REPORT_FILE"
-  write_nmap_scan_section "$target" 
-  write_ports_section "$target" >> "$REPORT_FILE"
-  write_ports_services_section >> "$REPORT_FILE" 
-  write_ssl_section >> "$REPORT_FILE"
-  write_firewall_section >> "$REPORT_FILE"
-  write_vulns_section | sed 's/\x1b\[[0-9;]*m//g' >> "$REPORT_FILE"
-  write_versions_section >> "$REPORT_FILE"
-  write_recs_section >> "$REPORT_FILE"
-  write_notes_section >> "$REPORT_FILE"
-  write_footer >> "$REPORT_FILE"
+: > "$FINAL_REPORT"   # truncate/create fresh report
+
+  write_header "$target"
+  write_summary_section
+  write_os_section "target"
+  write_nmap_scan_section "$target"
+  write_ports_section "$target"
+  write_ports_services_section
+  write_ssl_section "target"
+  write_firewall_section
+  write_vulns_section
+  write_versions_section
+  write_recs_section
+  write_notes_section
+  write_footer
 }
 
 # Execute Script
