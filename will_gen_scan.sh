@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # GitHub Repository Added
 # HTTPS: https://github.com/WillJ7915/finial-project-scanner.git
@@ -26,8 +26,10 @@ append_report() { strip_ansi >> "$FINAL_REPORT"; }
 log_both() {
   # Print colored to console; plain to file
   local msg="$1"
+  # To Console with color
   echo -e "$msg"
-  echo -e "$msg" | append_report
+  # To File (clean)
+  echo -e "$msg" | strip_ansi >> "$FINAL_REPORT"
 }
 
 record_severity() {
@@ -42,8 +44,9 @@ record_severity() {
 # Global Variables
 timestamp=$(date +"%Y%m%d_%H%M")
 SCAN_RESULTS=""
-NMAP_RESULTS="nmap_scan.txt"
-NMAP_VULN_RESULTS="nmap_vuln_scan.txt"
+NMAP_RESULTS="nmap_scan_${timestamp}.txt"
+NMAP_OS_RESULTS="nmap_os_results_${timestamp}.txt"
+NMAP_VULN_RESULTS="nmap_vuln_scan_${timestamp}.txt"
 FINAL_REPORT="net_scan_rpt_${timestamp}.txt"
 CRITICAL_COUNT=0
 HIGH_COUNT=0
@@ -63,6 +66,33 @@ check_dependencies() {
   [ "$missing" -eq 1 ] && exit 1
 }
 
+# Run fast port/service scan
+run_fast_scan() {
+    local target="$1"
+    log_both "Running fast service scan on $target..."
+    nmap -sV -F "$target" -oN "$NMAP_RESULTS"
+}
+
+# Run OS detection scan
+run_os_scan() {
+    local target="$1"
+    log_both "Running OS detection scan on $target (sudo may be required)..."
+    sudo nmap -O "$target" -oN "$NMAP_OS_RESULTS"
+}
+
+# Run Nikto scan for web ports detected
+run_nikto_scan() {
+    local target="$1"
+    #Check if port 80 or 443 is/are open
+    if grep -qE '\b(80|443)/tcp\s+open' "$NMAP_RESULTS"; then
+        log_both "[+] Web server detected. Launching Nikto scan (200s timeout)..."
+        timeout 200s nikto -h "$target" 2>&1 | append_report
+        log_both "[+] Nikto scan complete."
+    else
+        log_both "[+] No web server detected on common ports. Skipping Nikto scan."
+    fi
+}
+
 # Print Usage and Exit if Arguments are Invalid
 validate_input() {
   if [ "$#" -ne 1 ]; then
@@ -75,21 +105,18 @@ validate_input() {
 write_header() {
   local target="$1"
 
-
   local FIG_FONT="smblock"
   if ! figlet -f "$FIG_FONT" "X" >/dev/null 2>&1; then
     FIG_FONT="slant"
   fi
 
-
   echo -e "${RED}*****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}*****${NC}"
   figlet -f "$FIG_FONT" "Network Security Scan Report"
   echo -e "${RED}*****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}*****${NC}"
 
-
+  figlet -f mini "Network Security Scan Report" | append_report
   log_both "Target IP/Hostname: $target"
   log_both "Generated: $(date '+%Y-%m-%d %H:%M')"
-
 
   # TOC (printed to both, stored plain in file)
   log_both ""
@@ -107,31 +134,26 @@ write_header() {
   log_both ""
 }
 
-write_summary_section() {
-  section "Criticality Summary"
-
-
-  log_both "Critical Findings: $CRITICAL_COUNT"
-  log_both "High Findings:     $HIGH_COUNT"
-  log_both "Medium Findings:   $MEDIUM_COUNT"
-  log_both "Low Findings:      $LOW_COUNT"
-  log_both ""
-}
-
 # Operating System Detection
 write_os_section() {
   section "Operating System Detection"
-  # OS detection may require sudo
-  if command -v nmap >/dev/null 2>&1; then
-    # Light OS guess using service fingerprints
-    grep -E "Service Info: OS:" "$NMAP_RESULTS" | append_report
 
-    # Deeper check (without sudo)
-    echo -e "\n--- nmap -O (if permitted) ---" | append_report
-    nmap -O "$1" 2>/dev/null | grep -E "OS details|Running|CPE:" | append_report
-  else
-    log_both "nmap not available for OS detection."
-  fi
+    # First, try light OS detection from fast scan
+    if [ -f "$NMAP_RESULTS" ]; then
+        grep -E "Service Info: OS:" "$NMAP_RESULTS" | while IFS= read -r line; do
+            log_both "$line"
+        done
+    fi
+
+    # Fallback: OS detection from nmap -O
+    if [ -f "$NMAP_OS_RESULTS" ]; then
+        echo -e "\n--- nmap -O OS Detection ---" | append_report
+        grep -E "OS details|Running|CPE:" "$NMAP_OS_RESULTS" | while IFS= read -r line; do
+            log_both "$line"
+        done
+    else
+        log_both "No OS information detected. Ensure nmap -O was run and you have sufficient privileges."
+    fi
 }
 
 # Nmap Scan Section
@@ -141,14 +163,12 @@ write_nmap_scan_section() {
   timestamp=$(date "+%Y-%m-%d %H:%M")
 
   section "Nmap Scan"
-  log_both "Fast scan (-sV -F) for ${target} ad ${ts}"
-
+  log_both "Fast scan (-sV -F) for ${target} at ${timestamp}"
 
   # Fast scan to identify basic open services
   nmap -sV -F "$target" | tee "$NMAP_RESULTS" | grep -E "^[0-9]+/tcp\s+open" | while read -r line; do
     echo -e "${CYAN}$line${NC}"
   done | append_report
-
 
   # Also dump full fast-scan into the report
   echo -e "\n--- Full Fast Scan Output ---" | append_report
@@ -231,7 +251,6 @@ write_firewall_section() {
 write_vulns_section() {
   section "Vulnerability Findings"
 
-
   # Summarize CVEs that nmap scripts printed
   if grep -qE 'CVE-' "$NMAP_VULN_RESULTS"; then
     log_both "CVE references detected by nmap scripts:"
@@ -239,22 +258,11 @@ write_vulns_section() {
       | sed 's/^[[:space:]]\+//; s/[[:space:]]\+$//' \
       | sort -u \
       | while read -r cve; do
-          # Attempt detection of severity keywords in line
-          if echo "$cve" | grep -qi "CVSS.*10\|Critical"; then
-            record_severity Critical
-          elif echo "$cve" | grep -qi "CVSS.*[7-9]\|High"; then
-            record_severity High
-          elif echo "$cve" | grep -qi "CVSS.*[4-6]\|Medium"; then
-            record_severity Medium
-          else
-            record_severity Low
-          fi
-          echo "$cve" | append_report
-       done
+          log_both "$cve"
+      done
   else
     log_both "No CVE references found by nmap --script vuln."
   fi
-
 
   # Include the full vuln script output in the report
   echo -e "\n--- Full nmap --script vuln Output ---" | append_report
@@ -271,52 +279,100 @@ query_nvd() {
   [ -z "$product" ] && return
   [ -z "$version" ] && return
 
-  # URL-encode spaces minimally
-  local q
-  q=$(printf "%s %s" "$product" "$version" | sed 's/ \+/%20/g')
+  echo "Querying NVD for vulnerabilities in: $product $version..."
+
+  # The API needs a URL-encoded string.
+  local search_query
+  search_query=$(printf "%s %s" "$product" "$version" | sed 's/ \+/%20/g')
 
   # Header in both console (color) and report (plain)
   log_both "\n### NVD Matches: ${product} ${version} ###"
 
-  curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${q}&resultsPerPage=${results_limit}" \
-  | jq -r '
-     .vulnerabilities[]?.cve
-     | {
-         id: .id,
-         desc: (.descriptions[]? | select(.lang=="en") | .value) // "No English description",
-         score: (
-           .metrics.cvssMetricV31[0]?.cvssData.baseScore //
-           .metrics.cvssMetricV30[0]?.cvssData.baseScore //
-           .metrics.cvssMetricV2[0]?.cvssData.baseScore // "N/A"
-         )
-       }
-     | "- \(.id) - CVSS: \(.score)\n  \(.desc)"
-   ' \
-  | append_report # to file only keeping console clean
+  local nvd_api_url="https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${search_query}&resultsPerPage=${results_limit}"
+
+  local vulnerabilities_json
+  vulnerabilities_json=$(curl -s "$nvd_api_url")
+
+  # --- Defensive Programming: Check for Errors ---
+  if [[ -z "$vulnerabilities_json" ]]; then
+        echo "  [!] Error: Failed to fetch data from NVD. The API might be down or unreachable."
+        return
+    fi
+    if echo "$vulnerabilities_json" | jq -e '.message' > /dev/null; then
+        echo "  [!] NVD API Error: $(echo "$vulnerabilities_json" | jq -r '.message')"
+        return
+    fi
+    if ! echo "$vulnerabilities_json" | jq -e '.vulnerabilities[0]' > /dev/null; then
+        echo "  [+] No vulnerabilities found in NVD for this keyword search."
+        return
+    fi
+    # --- End Error Checks ---
+
+    # This jq command filters the JSON and formats it for our report.
+    # It extracts the CVE ID, the English description, and the severity.
+    echo "$vulnerabilities_json" | jq -r '
+        .vulnerabilities[] |
+        "  CVE ID: \(.cve.id)\n" +
+        "  Description: \((.cve.descriptions[] | select(.lang==\"en\")).value | gsub("\n"; " "))\n" +
+        "  Severity: \(
+          if .cve.metrics.cvssMetricV31 then
+            .cve.metrics.cvssMetricV31[0].cvssData.baseSeverity
+          elif .cve.metrics.cvssMetricV2 then
+            .cve.metrics.cvssMetricV2[0].cvssData.baseSeverity
+          else
+            "Unknown"
+          end
+        )\n"
+      ' | while IFS= read -r line; do
+          log_both "  $line"
+
+          # If line contains severity, extract it and record
+          if [[ "$line" =~ ^Severity:\ (.*) ]]; then
+        local severity="${BASH_REMATCH[1]}"
+        case "$severity" in
+          Critical) record_severity Critical ;;
+          High)     record_severity High ;;
+          Medium)   record_severity Medium ;;
+          Low)      record_severity Low ;;
+        esac
+      fi
+  done
 }
 
 # Detected Services Version Information
 write_versions_section() {
   section "Detected Services Version Information"
 
-
   if [ -n "$SCAN_RESULTS_SERVICES" ]; then
-    echo "$SCAN_RESULTS_SERVICES" \
-    | grep "open" \
-    | awk '{printf "- Port %s: %s %s %s\n", $1, $3, $4, $5}' \
-    | append_report
+      echo "$SCAN_RESULTS_SERVICES" \
+      | grep "open" \
+      | while IFS= read -r line; do
+          port=$(echo "$line" | awk '{print $1}')
+          service=$(echo "$line" | awk '{print $3}')
+          product_and_version=$(echo "$line" | cut -d ' ' -f4-)
+          log_both "- Port $port: Service=$service, Info=$product_and_version"
+      done
   else
     log_both "No Version Information available (did scan run?)."
   fi
 
+  log_both ""
+}
 
+# Criticality Summary console and report view
+write_summary_section() {
+  section "Criticality Summary"
+
+  log_both "Critical Findings: $CRITICAL_COUNT"
+  log_both "High Findings:     $HIGH_COUNT"
+  log_both "Medium Findings:   $MEDIUM_COUNT"
+  log_both "Low Findings:      $LOW_COUNT"
   log_both ""
 }
 
 # Recommendations Section
 write_recs_section() {
   section "Recommendations for Remediation"
-
 
   log_both "General Best Practices:"
   log_both "1. Keep all software updated to the latest stable versions."
@@ -336,7 +392,6 @@ write_recs_section() {
     log_both "8. Secure SSH: disable root login, enforce key-based authentication, change default port if possible."
   fi
 
-
   log_both ""
 }
 
@@ -344,15 +399,12 @@ write_recs_section() {
 write_notes_section() {
   section "Notes & Analyst Comments"
 
-
   log_both "This section is reserved for analyst observations."
   log_both "Consider including:"
   log_both "- Business impact of identified vulnerabilities"
   log_both "- Potential false positives from automated scans"
   log_both "- Recommendations for further manual testing"
   log_both "- Any unusual network behavior noticed during scans"
-
-
   log_both "\n[Analyst Notes Placeholder]\n"
 
   # Manual notes to be viewed
@@ -377,17 +429,30 @@ main() {
 : > "$FINAL_REPORT"   # truncate/create fresh report
 
   write_header "$target"
-  write_summary_section
-  write_os_section "target"
-  write_nmap_scan_section "$target"
-  write_ports_section "$target"
-  write_ports_services_section
-  write_ssl_section "target"
-  write_firewall_section
-  write_vulns_section
-  write_versions_section
+  for target in "$@"; do
+      section "Scanning Target: $target"
+
+      # Run scans in order
+      run_fast_scan "$target"
+      run_os_scan "$target"
+      run_nikto_scan "$target" 
+
+      # Write sections based on scan data for this host
+      write_os_section "$target"
+      write_nmap_scan_section "$target"
+      write_ports_section "$target"
+      write_ports_services_section "$target"
+      write_ssl_section "$target"
+      write_firewall_section "$target"
+      write_vulns_section "$target"
+      write_versions_section "$target"
+  done
+  # Analyst notes and recommendations
   write_recs_section
   write_notes_section
+
+  # Global Summary (no $target passed)
+  write_summary_section
   write_footer
 }
 
