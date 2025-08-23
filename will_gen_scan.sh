@@ -14,15 +14,10 @@ CYAN='\033[0;36m'
 WHITE='\033[1;37m'
 NC='\033[0m'
 
-# No Color / Reset
-
 # Helpers for clean reporting
 strip_ansi() { sed -r 's/\x1B\[[0-9;]*[mK]//g'; }
-
 section() { log_both "### $1 ###"; }
-
 append_report() { strip_ansi >> "$FINAL_REPORT"; }
-
 log_both() {
   # Print colored to console; plain to file
   local msg="$1"
@@ -42,18 +37,20 @@ record_severity() {
 }
 
 # Global Variables
+target="$1"
 timestamp=$(date +"%Y%m%d_%H%M")
-SCAN_RESULTS=""
+SCAN_RESULTS="scan_results_${timestamp}.txt"
 NMAP_RESULTS="nmap_scan_${timestamp}.txt"
-NMAP_OS_RESULTS="nmap_os_results_${timestamp}.txt"
 NMAP_VULN_RESULTS="nmap_vuln_scan_${timestamp}.txt"
 FINAL_REPORT="net_scan_rpt_${timestamp}.txt"
+LOG_FILE="scan_log_${timestamp}.txt"
 CRITICAL_COUNT=0
 HIGH_COUNT=0
 MEDIUM_COUNT=0
 LOW_COUNT=0
+DEEP_SCAN=true # Full TCP/UDP/Service sweeps (enabled with 'true'; disabled with 'false')
 
-# Tool Checks
+# Dependency Check
 check_dependencies() {
   local -a cmds=(nmap nikto figlet curl jq timeout grep awk sed tee)
   local missing=0
@@ -66,395 +63,277 @@ check_dependencies() {
   [ "$missing" -eq 1 ] && exit 1
 }
 
-# Run fast port/service scan
-run_fast_scan() {
+# Header
+write_header() {
     local target="$1"
-    log_both "Running fast service scan on $target..."
-    nmap -sV -F "$target" -oN "$NMAP_RESULTS"
+    local FIG_FONT="smblock"
+    if ! figlet -f "$FIG_FONT" "X" >/dev/null 2>&1; then FIG_FONT="slant"; fi
+    echo -e "${RED}*****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${NC}"
+    figlet -f "$FIG_FONT" "Network Security Scan Report"
+    echo -e "${RED}*****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${NC}"
+    log_both "Target IP/Hostname: $target"
+    log_both "Generated: $(date '+%Y-%m-%d %H:%M')"
+    log_both ""
+    log_both "## Table of Contents"
+    log_both "1. Operating System Detection"
+    log_both "2. Nmap Scan"
+    log_both "3. Open Ports & Web Services"
+    log_both "4. Detected Services & Versions"
+    log_both "5. SSL/TLS Configuration"
+    log_both "6. Firewall Indicators"
+    log_both "7. Vulnerability Findings & NVD"
+    log_both "8. Recommendations"
+    log_both "9. Analyst Notes"
+    log_both "10. Criticality Summary"
+    log_both ""
 }
 
-# Run OS detection scan
-run_os_scan() {
-    local target="$1"
-    log_both "Running OS detection scan on $target (sudo may be required)..."
-    sudo nmap -O "$target" -oN "$NMAP_OS_RESULTS"
+# Perform Nmap Scan
+nmap_scan() {
+    echo -e "${GREEN}[*] Running initial nmap scan on $target...${NC}" | tee -a "$LOG_FILE"
+    nmap -sS -sV -F -O --script=vuln --script-args=unsafe=1 "$target" -oN "$SCAN_RESULTS"
+    nmap -sV -F "$target" -oN "$NMAP_RESULTS"
+    if [[ "$DEEP_SCAN" == "true" ]]; then
+        echo "[*] Running deep TCP/UDP scan..." | tee -a "$LOG_FILE"
+        nmap -sS -sV -p- --open --reason --script vuln,http-vuln*,dns*,smtp* "$target" >> "$SCAN_RESULTS"
+        nmap -sU --top-ports 50 --open --reason "$target" >> "$SCAN_RESULTS"
+        nmap --script ftp*,mysql*,smb*,http* "$target" >> "$SCAN_RESULTS"
+    fi
+    # Run vulnerability NSE scripts
+    nmap -sV --script vuln,ftp-anon,ssh2-enum-algos,http-config-backup,mysql-info,smb-enum-shares "$target" | tee "$NMAP_VULN_RESULTS" >/dev/null
 }
 
 # Run Nikto scan for web ports detected
 run_nikto_scan() {
-    local target="$1"
     #Check if port 80 or 443 is/are open
     if grep -qE '\b(80|443)/tcp\s+open' "$NMAP_RESULTS"; then
         log_both "[+] Web server detected. Launching Nikto scan (200s timeout)..."
-        timeout 200s nikto -h "$target" 2>&1 | append_report
+        if ! timeout 200s nikto -h "$target" 2>&1 | append_report; then
+            log_both "[!] Nikto scan failed for $target (possible timeout or connectivity issue)."
+            return 1
+        fi
         log_both "[+] Nikto scan complete."
     else
         log_both "[+] No web server detected on common ports. Skipping Nikto scan."
     fi
 }
 
-# Print Usage and Exit if Arguments are Invalid
-validate_input() {
-  if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 <target_ip_or_hostname>" >&2
-    exit 1
-  fi
-}
-
-# Header
-write_header() {
-  local target="$1"
-
-  local FIG_FONT="smblock"
-  if ! figlet -f "$FIG_FONT" "X" >/dev/null 2>&1; then
-    FIG_FONT="slant"
-  fi
-
-  echo -e "${RED}*****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}*****${NC}"
-  figlet -f "$FIG_FONT" "Network Security Scan Report"
-  echo -e "${RED}*****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}*****${NC}"
-
-  figlet -f mini "Network Security Scan Report" | append_report
-  log_both "Target IP/Hostname: $target"
-  log_both "Generated: $(date '+%Y-%m-%d %H:%M')"
-
-  # TOC (printed to both, stored plain in file)
-  log_both ""
-  log_both "## Table of Contents"
-  log_both "1. Operating System Detection"
-  log_both "2. Nmap Scan"
-  log_both "3. Open Ports & Web Services"
-  log_both "4. Detected Open Ports & Services"
-  log_both "5. SSL/TLS Configuration"
-  log_both "6. Firewall Indicators"
-  log_both "7. Vulnerability Findings"
-  log_both "8. Detected Services Version Information"
-  log_both "9. Recommendations for Remediation"
-  log_both "10. Notes and Analyst Comments"
-  log_both ""
+# Network Infrastructure Mapping
+network_infra() {
+    echo "[*] Mapping network infrastructure..." | tee -a "$LOG_FILE"
+    nmap --traceroute "$target" -oN "nmap_traceroute_${timestamp}.txt"
+    traceroute -n "$target" > "traceroute_${timestamp}.txt"
+    cat "traceroute_${timestamp}.txt" >> "$FINAL_REPORT"
+    if command -v curl >/dev/null 2>&1; then
+        echo -e "\n[*] Enriching with IP/ASN details..." | tee -a "$LOG_FILE"
+        curl -s ipinfo.io/$target >> "$SCAN_RESULTS"
+    fi
 }
 
 # Operating System Detection
 write_os_section() {
-  section "Operating System Detection"
-
-    # First, try light OS detection from fast scan
+    section "Operating System Detection"
     if [ -f "$NMAP_RESULTS" ]; then
         grep -E "Service Info: OS:" "$NMAP_RESULTS" | while IFS= read -r line; do
             log_both "$line"
         done
     fi
+}
 
-    # Fallback: OS detection from nmap -O
-    if [ -f "$NMAP_OS_RESULTS" ]; then
-        echo -e "\n--- nmap -O OS Detection ---" | append_report
-        grep -E "OS details|Running|CPE:" "$NMAP_OS_RESULTS" | while IFS= read -r line; do
-            log_both "$line"
-        done
+# Ports & services
+write_ports_services_section() {
+    section "Detected Open Ports & Services"
+    local scan="$NMAP_RESULTS"
+    cat "$scan" | grep "open" | while read -r line; do
+        port=$(echo "$line" | awk '{print $1}')
+        service=$(echo "$line" | awk '{print $3}')
+        product_and_version=$(echo "$line" | cut -d ' ' -f4-)
+        log_both "- Port $port: Service=$service, Info=$product_and_version"
+        if [ -n "$product_and_version" ]; then
+            product_name=$(echo "$product_and_version" | awk '{NF--; print}')
+            product_version=$(echo "$product_and_version" | awk '{print $NF}')
+            query_nvd "$product_name" "$product_version"
+        fi
+    done
+}
+
+# SSL/TLS
+write_ssl_section() {
+    section "SSL/TLS Configuration"
+    if grep -qE '\b443/tcp\s+open' "$NMAP_RESULTS"; then
+        log_both "Port 443 detected open. Summarizing TLS..."
+        nmap --script ssl-enum-ciphers -p 443 "$target" 2>/dev/null | append_report
     else
-        log_both "No OS information detected. Ensure nmap -O was run and you have sufficient privileges."
+        log_both "No HTTPS service detected. Skipping TLS."
     fi
 }
 
-# Nmap Scan Section
-write_nmap_scan_section() {
-  local target="$1"
-  local timestamp
-  timestamp=$(date "+%Y-%m-%d %H:%M")
-
-  section "Nmap Scan"
-  log_both "Fast scan (-sV -F) for ${target} at ${timestamp}"
-
-  # Fast scan to identify basic open services
-  nmap -sV -F "$target" | tee "$NMAP_RESULTS" | grep -E "^[0-9]+/tcp\s+open" | while read -r line; do
-    echo -e "${CYAN}$line${NC}"
-  done | append_report
-
-  # Also dump full fast-scan into the report
-  echo -e "\n--- Full Fast Scan Output ---" | append_report
-  cat "$NMAP_RESULTS" | append_report
-
-  log_both "\n--- Launching Vulnerability Script Scan ---"
-  nmap -sV --script vuln "$target" | tee "$NMAP_VULN_RESULTS" >/dev/null
-  echo -e "\n--- nmap --script vuln Output ---" | append_report
-  cat "$NMAP_VULN_RESULTS" | append_report
-
-  # Store the scan output in a global variable for later use (in vuln parsing)
-  SCAN_RESULTS_SERVICES=$(cat "$NMAP_RESULTS")
-  SCAN_RESULTS_VULNS=$(cat "$NMAP_VULN_RESULTS")
-}
-
-# Open Ports + Web Services (80/443) Section
-write_ports_section() {
-  section "Open Ports & Web Services"
-  if grep -qE '\b(80|443)/tcp\s+open' "$NMAP_RESULTS"; then
-    log_both "[+] Web Server detected. Launching Nikto (200s timeout)..."
-    echo -e "\n--- Nikto Output ---" | append_report
-    timeout 200s nikto -h "$1" 2>&1 | append_report
-    log_both "[+] Nikto Scan Complete."
-  else
-    log_both "[+] No Web Server detected on common ports. Skipping Nikto scan."
-  fi
-}
-
-# Ports and Services Results
-write_ports_services_section() {
-  section "Detected Open Ports & Services"
-
-  echo "$SCAN_RESULTS_SERVICES" | grep "open" | while read -r line; do
-    # Example line: 80/tcp   open  http    Apache httpd 2.4.49
-    port=$(echo "$line" | awk '{print $1}')
-    service=$(echo "$line" | awk '{print $3}')
-
-
-    product_and_version=$(echo "$line" | cut -d ' ' -f4-)
-    product_name=$(echo "$product_and_version" | awk '{NF--; print}')
-    product_version=$(echo "$product_and_version" | awk '{print $NF}')
-
-    echo -e "${GREEN}Port:${NC} $port"
-    echo -e "${GREEN}Service:${NC} $service"
-    echo -e "${GREEN}Product:${NC} $product_name"
-    echo -e "${GREEN}Version:${NC} $product_version"
-
-  if [ -n "$product_name" ] && [ -n "$product_version" ]; then
-    query_nvd "$product_name" "$product_version"
-  fi
-
-    echo ""
-  done
-}
-
-# SSL/TLS Configuration
-write_ssl_section() {
-  section "SSL/TLS Configuration"
-  if grep -qE '\b443/tcp\s+open' "$NMAP_RESULTS"; then
-    log_both "Port 443 detected open. Summarizing TLS via nmap ssl-enum-ciphers..."
-    echo -e "\n--- nmap --script ssl-enum-ciphers -p 443 ---" | append_report
-    nmap --script ssl-enum-ciphers -p 443 "$1" 2>/dev/null \
-      | grep -E "TLSv|cipher|ciphers" | append_report
-  else
-    log_both "No HTTPS service (443) detect in fast scan. Skipping TLS details."
-  fi
-}
-
-# Firewall and Security Tools Detection
+# Firewall detection
 write_firewall_section() {
-  section "Firewall Indicators"
-  if grep -q "filtered" "$NMAP_RESULTS"; then
-    log_both "Some ports appear filtered. A firewall or packet filter is likely present."
-  else
-    log_both "No clear indicators of packet filtering in fast scan."
-  fi
+    section "Firewall Indicators"
+    if grep -q "filtered" "$NMAP_RESULTS"; then
+        log_both "Some ports appear filtered. Firewall likely present."
+    else
+        log_both "No clear firewall indicators detected."
+    fi
 }
 
 # Vulnerabilities Section
 write_vulns_section() {
-  section "Vulnerability Findings"
-
-  # Summarize CVEs that nmap scripts printed
-  if grep -qE 'CVE-' "$NMAP_VULN_RESULTS"; then
-    log_both "CVE references detected by nmap scripts:"
-    grep -E 'CVE-' "$NMAP_VULN_RESULTS" \
-      | sed 's/^[[:space:]]\+//; s/[[:space:]]\+$//' \
-      | sort -u \
-      | while read -r cve; do
-          log_both "$cve"
-      done
-  else
-    log_both "No CVE references found by nmap --script vuln."
-  fi
-
-  # Include the full vuln script output in the report
-  echo -e "\n--- Full nmap --script vuln Output ---" | append_report
-  cat "$NMAP_VULN_RESULTS" | append_report
+    section "Vulnerability Findings"
+    if grep -qE 'CVE-' "$NMAP_VULN_RESULTS"; then
+        log_both "CVE references detected:"
+        grep -E 'CVE-' "$NMAP_VULN_RESULTS" | sort -u | while read -r cve; do
+            log_both "$cve"
+            # Lookup recommended mitigation dynamically
+            case "$cve" in
+                *CVE-2021-44228*) log_both "Recommendation: Patch log4j to 2.17.1 or later." ;;
+                *CVE-2022-22965*) log_both "Recommendation: Apply Spring4Shell patch." ;;
+            esac
+        done
+    else
+        log_both "No CVEs found by nmap scripts."
+    fi
+    echo -e "\n--- Full nmap vuln output ---" | append_report
+    cat "$NMAP_VULN_RESULTS" | append_report
 }
 
-# NVD Query Function
+# NVD Query
 query_nvd() {
-  local product="$1"
-  local version="$2"
-  local results_limit=3
-
-  # Avoid empty queries
-  [ -z "$product" ] && return
-  [ -z "$version" ] && return
-
-  echo "Querying NVD for vulnerabilities in: $product $version..."
-
-  # The API needs a URL-encoded string.
-  local search_query
-  search_query=$(printf "%s %s" "$product" "$version" | sed 's/ \+/%20/g')
-
-  # Header in both console (color) and report (plain)
-  log_both "\n### NVD Matches: ${product} ${version} ###"
-
-  local nvd_api_url="https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${search_query}&resultsPerPage=${results_limit}"
-
-  local vulnerabilities_json
-  vulnerabilities_json=$(curl -s "$nvd_api_url")
-
-  # --- Defensive Programming: Check for Errors ---
-  if [[ -z "$vulnerabilities_json" ]]; then
-        echo "  [!] Error: Failed to fetch data from NVD. The API might be down or unreachable."
+    local product="$1"
+    local version="$2"
+    [ -z "$product" ] && return
+    [ -z "$version" ] && return
+    log_both "Querying NVD for $product $version..."
+    local search_query
+    search_query=$(printf "%s %s" "$product" "$version" | sed 's/ \+/%20/g')
+    local json
+    json=$(curl -s "https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=${search_query}&resultsPerPage=3")
+    if [[ -z "$json" ]] || echo "$json" | jq -e '.message' >/dev/null; then
+        log_both "[!] NVD API error or no results."
         return
     fi
-    if echo "$vulnerabilities_json" | jq -e '.message' > /dev/null; then
-        echo "  [!] NVD API Error: $(echo "$vulnerabilities_json" | jq -r '.message')"
-        return
-    fi
-    if ! echo "$vulnerabilities_json" | jq -e '.vulnerabilities[0]' > /dev/null; then
-        echo "  [+] No vulnerabilities found in NVD for this keyword search."
-        return
-    fi
-    # --- End Error Checks ---
-
-    # This jq command filters the JSON and formats it for our report.
-    # It extracts the CVE ID, the English description, and the severity.
-    echo "$vulnerabilities_json" | jq -r '
-        .vulnerabilities[] |
-        "  CVE ID: \(.cve.id)\n" +
-        "  Description: \((.cve.descriptions[] | select(.lang==\"en\")).value | gsub("\n"; " "))\n" +
-        "  Severity: \(
-          if .cve.metrics.cvssMetricV31 then
-            .cve.metrics.cvssMetricV31[0].cvssData.baseSeverity
-          elif .cve.metrics.cvssMetricV2 then
-            .cve.metrics.cvssMetricV2[0].cvssData.baseSeverity
-          else
-            "Unknown"
-          end
-        )\n"
-      ' | while IFS= read -r line; do
-          log_both "  $line"
-
-          # If line contains severity, extract it and record
-          if [[ "$line" =~ ^Severity:\ (.*) ]]; then
-        local severity="${BASH_REMATCH[1]}"
-        case "$severity" in
-          Critical) record_severity Critical ;;
-          High)     record_severity High ;;
-          Medium)   record_severity Medium ;;
-          Low)      record_severity Low ;;
-        esac
-      fi
-  done
+    echo "$json" | jq -r '.vulnerabilities[] | "  CVE ID: \(.cve.id)\n  Description: \((.cve.descriptions[] | select(.lang=="en")).value)\n  Severity: \(
+        if .cve.metrics.cvssMetricV31 then .cve.metrics.cvssMetricV31[0].cvssData.baseSeverity
+        elif .cve.metrics.cvssMetricV2 then .cve.metrics.cvssMetricV2[0].cvssData.baseSeverity
+        else "Unknown" end)"' | while read -r line; do
+        log_both "$line"
+        if [[ "$line" =~ ^Severity:\ (.*) ]]; then
+            record_severity "${BASH_REMATCH[1]}"
+        fi
+    done
+    # Prevent hitting API rate limits
+    sleep 1
 }
 
-# Detected Services Version Information
-write_versions_section() {
-  section "Detected Services Version Information"
-
-  if [ -n "$SCAN_RESULTS_SERVICES" ]; then
-      echo "$SCAN_RESULTS_SERVICES" \
-      | grep "open" \
-      | while IFS= read -r line; do
-          port=$(echo "$line" | awk '{print $1}')
-          service=$(echo "$line" | awk '{print $3}')
-          product_and_version=$(echo "$line" | cut -d ' ' -f4-)
-          log_both "- Port $port: Service=$service, Info=$product_and_version"
-      done
-  else
-    log_both "No Version Information available (did scan run?)."
-  fi
-
-  log_both ""
-}
-
-# Criticality Summary console and report view
-write_summary_section() {
-  section "Criticality Summary"
-
-  log_both "Critical Findings: $CRITICAL_COUNT"
-  log_both "High Findings:     $HIGH_COUNT"
-  log_both "Medium Findings:   $MEDIUM_COUNT"
-  log_both "Low Findings:      $LOW_COUNT"
-  log_both ""
-}
-
-# Recommendations Section
+# Recommendations
 write_recs_section() {
-  section "Recommendations for Remediation"
+    section "Recommendations"
+    log_both "General Best Practices:"
+    log_both "1. Keep software updated."
+    log_both "2. Change default credentials."
+    log_both "3. Enforce strong passwords and SSH keys."
+    log_both "4. Restrict unnecessary ports via firewall."
+    log_both "5. Regular backups."
 
-  log_both "General Best Practices:"
-  log_both "1. Keep all software updated to the latest stable versions."
-  log_both "2. Change or disable default credentials immediately."
-  log_both "3. Enforce strong password and SSH key policies."
-  log_both "4. Implement a Firewall and restrict unnecessary open ports."
-  log_both "5. Regularly back up configurations and critical data."
-
-  # Conditional service-based recommendations
-  if echo "$SCAN_RESULTS_SERVICES" | grep -qi "apache"; then
-    log_both "6. Harden Apache: disable directory listing, apply security modules (mod_security)."
-  fi
-  if echo "$SCAN_RESULTS_SERVICES" | grep -qi "mysql"; then
-    log_both "7. Secure MySQL: restrict root access, enforce SSL/TLS, and use least privilege accounts."
-  fi
-  if echo "$SCAN_RESULTS_SERVICES" | grep -qi "ssh"; then
-    log_both "8. Secure SSH: disable root login, enforce key-based authentication, change default port if possible."
-  fi
-
-  log_both ""
+    # Dynamic remediation notes from CVE scan
+    if grep -q "CVE-" "$NMAP_VULN_RESULTS"; then
+        log_both "Mitigation notes for detected CVEs:"
+        grep -E 'CVE-' "$NMAP_VULN_RESULTS" | sort -u | while read -r cve; do
+            case "$cve" in
+                *CVE-2021-44228*) log_both "  $cve → Patch log4j to 2.17.1+" ;;
+                *CVE-2022-22965*) log_both "  $cve → Apply Spring4Shell patch." ;;
+                *) log_both "  $cve → Check vendor advisory for mitigation." ;;
+            esac
+        done
+    fi
 }
 
-# Notes and Analyst Comments
+# Notes & Analyst Comments
 write_notes_section() {
-  section "Notes & Analyst Comments"
+    section "Analyst Notes"
+    log_both "Consider business impact, false positives, further testing, unusual network behavior."
+    [ -f "analyst_notes.txt" ] && cat analyst_notes.txt | append_report
+}
 
-  log_both "This section is reserved for analyst observations."
-  log_both "Consider including:"
-  log_both "- Business impact of identified vulnerabilities"
-  log_both "- Potential false positives from automated scans"
-  log_both "- Recommendations for further manual testing"
-  log_both "- Any unusual network behavior noticed during scans"
-  log_both "\n[Analyst Notes Placeholder]\n"
+# Summary
+write_summary_section() {
+    section "Criticality Summary"
+    log_both "Critical Findings: $CRITICAL_COUNT"
+    log_both "High Findings:     $HIGH_COUNT"
+    log_both "Medium Findings:   $MEDIUM_COUNT"
+    log_both "Low Findings:      $LOW_COUNT"
+    log_both "See detailed logs in:"
+    log_both "- $SCAN_RESULTS"
+    log_both "- $NMAP_RESULTS"
+    log_both "- $NMAP_VULN_RESULTS"
+}
 
-  # Manual notes to be viewed
-  if [ -f "analyst_notes.txt" ]; then
-    cat analyst_notes.txt | append_report
-  fi
+# Input validation
+validate_input() {
+    if [ "$#" -ne 1 ]; then
+        echo "Usage: $0 <target_ip_or_hostname>" >&2
+        exit 1
+    fi
+    local input="$1"
+    if ! [[ "$input" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$input" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+        echo "Error: Invalid IP or hostname."
+        exit 1
+    fi
 }
 
 # Footer
 write_footer() {
-  echo -e "${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${NC}"
-  echo "End of Report - Generated on: $(date)"
-  echo -e "${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}****${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${WHITE}***${BLUE}***${RED}***${NC}"
+    section "Ethical Considerations"
+    log_both "- Authorized use only. Do not scan without permission."
+    log_both "- Follow legal and ethical guidelines."
+    log_both ""
+    echo -e "${RED}***${WHITE}***${BLUE}***${NC}"
+    echo "End of Report - Generated on: $(date)"
+    echo -e "${RED}***${WHITE}***${BLUE}***${NC}"
 }
 
-# Main Function
+# Main
 main() {
-  validate_input "$@"
-  check_dependencies
-
-  local target="$1"
-: > "$FINAL_REPORT"   # truncate/create fresh report
-
-  write_header "$target"
-  for target in "$@"; do
-      section "Scanning Target: $target"
-
-      # Run scans in order
-      run_fast_scan "$target"
-      run_os_scan "$target"
-      run_nikto_scan "$target" 
-
-      # Write sections based on scan data for this host
-      write_os_section "$target"
-      write_nmap_scan_section "$target"
-      write_ports_section "$target"
-      write_ports_services_section "$target"
-      write_ssl_section "$target"
-      write_firewall_section "$target"
-      write_vulns_section "$target"
-      write_versions_section "$target"
-  done
-  # Analyst notes and recommendations
-  write_recs_section
-  write_notes_section
-
-  # Global Summary (no $target passed)
-  write_summary_section
-  write_footer
+    validate_input "$@"
+    check_dependencies
+    target="$1"
+    : > "$FINAL_REPORT"
+  if [[ -f "$1" ]]; then
+    # Input is a file containing multiple targets
+    while read -r target; do
+    [[ -z "$target" ]] && continue 
+    write_header "$target"
+    nmap_scan "$target"
+    run_nikto_scan "$target"
+    network_infra "$target"
+    write_os_section "$target"
+    write_ports_services_section "$target"
+    write_ssl_section "$target"
+    write_firewall_section "$target"
+    write_vulns_section "$target"
+    write_recs_section
+    write_notes_section
+    write_summary_section
+    write_footer
+    done < "$1"
+  else
+    # Single host
+    target="$1"
+    write_header "$target"
+    nmap_scan "$target"
+    run_nikto_scan "$target"
+    network_infra "$target"
+    write_os_section "$target"
+    write_ports_services_section "$target"
+    write_ssl_section "$target"
+    write_firewall_section "$target"
+    write_vulns_section "$target"
+    write_recs_section
+    write_notes_section
+    write_summary_section
+    write_footer
+  fi
 }
 
-# Execute Script
 main "$@"
